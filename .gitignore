@@ -1,0 +1,7 @@
+bin/
+bin-icon/
+bin-gamefix/
+obj/
+artifacts/
+*.user
+.vs/
