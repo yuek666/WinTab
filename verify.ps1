@@ -1,10 +1,11 @@
-param([switch]$Native, [switch]$UI, [switch]$Performance, [switch]$Preview)
+param([switch]$Native, [switch]$UI, [switch]$Performance, [switch]$Preview, [string]$OutputDirectory = 'bin-preview-v2')
 $ErrorActionPreference = 'Stop'
-& (Join-Path $PSScriptRoot 'build.ps1') -Test
-$verifyOutput = Join-Path $PSScriptRoot 'artifacts'
+& (Join-Path $PSScriptRoot 'build.ps1') -Test -OutputDirectory $OutputDirectory
+$verifyOutput = Join-Path $PSScriptRoot 'artifacts\ui-v2'
+$verifyBinaryDirectory = if ([IO.Path]::IsPathRooted($OutputDirectory)) { $OutputDirectory } else { Join-Path $PSScriptRoot $OutputDirectory }
 New-Item -ItemType Directory -Force -Path $verifyOutput | Out-Null
 function Invoke-Verification([string]$Mode, [string]$Target, [string]$Report) {
-    $run = Start-Process -FilePath (Join-Path $PSScriptRoot 'bin\WindowTabManager.exe') -ArgumentList @($Mode, ('"' + $Target + '"')) -WindowStyle Hidden -Wait -PassThru
+    $run = Start-Process -FilePath (Join-Path $verifyBinaryDirectory 'WindowTabManager.exe') -ArgumentList @($Mode, ('"' + $Target + '"')) -WindowStyle Hidden -Wait -PassThru
     Get-Content -LiteralPath $Report
     if ($run.ExitCode -ne 0) { throw "$Mode failed. See $Report" }
 }

@@ -1,6 +1,8 @@
 bin/
 bin-icon/
 bin-gamefix/
+bin-ui-v2/
+bin-preview-v2/
 obj/
 artifacts/
 *.user

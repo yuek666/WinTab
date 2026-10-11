@@ -50,9 +50,11 @@ namespace WindowTabManager
         private bool tabConsumed, escapeConsumed;
         public void Reset() { AltSession = OverviewOpen = tabConsumed = escapeConsumed = false; }
         public void ClosePanel(int expectedGeneration = 0) { if (expectedGeneration == 0 || expectedGeneration == Generation) AltSession = OverviewOpen = false; }
-        public KeyDecision Handle(int key, bool down, bool alt, bool win, bool shift, bool control)
+        public KeyDecision Handle(int key, bool down, bool alt, bool win, bool shift, bool control, bool enableAlt = true, bool enableWin = true)
         {
             var d = new KeyDecision();
+            if (!enableAlt) AltSession = false;
+            if (!enableWin) OverviewOpen = false;
             if (key == 9 && !down && tabConsumed) { tabConsumed = false; d.Swallow = true; return d; }
             if (key == 27 && !down && escapeConsumed) { escapeConsumed = false; d.Swallow = true; return d; }
             if ((key == 0xA4 || key == 0xA5 || key == 0x12) && !down && !alt && AltSession) {
@@ -64,11 +66,11 @@ namespace WindowTabManager
                 d.Swallow = true; d.Action = SwitchAction.Cancel; return d;
             }
             if (key != 9 || control) return d;
-            if (alt && !win) {
+            if (alt && !win && enableAlt) {
                 d.Swallow = tabConsumed = true;
                 if (!AltSession) { Generation++; AltSession = true; OverviewOpen = false; d.MaskMenu = true; d.Action = SwitchAction.BeginAlt; }
                 else d.Action = shift ? SwitchAction.StepBackward : SwitchAction.StepForward;
-            } else if (win && !alt) {
+            } else if (win && !alt && enableWin) {
                 d.Swallow = tabConsumed = true;
                 if (!OverviewOpen) { Generation++; OverviewOpen = true; AltSession = false; d.MaskMenu = true; d.Action = SwitchAction.Overview; }
             }
@@ -97,9 +99,12 @@ namespace WindowTabManager
         private Exception startError;
         private static readonly UIntPtr Tag = new UIntPtr(0x57544D);
         public volatile bool UseActiveMonitor;
-        public KeyboardHook(Action<SwitchCommand> publish, Action<string> report)
+        private volatile int enabledMask;
+        public void Configure(bool alt, bool win) { enabledMask = (alt ? 1 : 0) | (win ? 2 : 0); }
+        public KeyboardHook(Action<SwitchCommand> publish, Action<string> report, bool enableAlt = true, bool enableWin = true)
         {
             this.publish = publish; this.report = report;
+            Configure(enableAlt, enableWin);
             thread = new Thread(Run) { IsBackground = true, Name = "Keyboard hook" };
             thread.SetApartmentState(ApartmentState.STA); thread.Start(); ready.WaitOne();
             if (startError != null) { thread.Join(); ready.Dispose(); throw startError; }
@@ -129,7 +134,8 @@ namespace WindowTabManager
                 bool down = wp.ToInt64() == 0x100 || wp.ToInt64() == 0x104;
                 modifiers.Observe(key, down);
                 bool reverse = modifiers.Shift;
-                var d = state.Handle(key, down, modifiers.AltFor(key, down, data.Flags), modifiers.Win, reverse, modifiers.Control);
+                int enabled = enabledMask;
+                var d = state.Handle(key, down, modifiers.AltFor(key, down, data.Flags), modifiers.Win, reverse, modifiers.Control, (enabled & 1) != 0, (enabled & 2) != 0);
                 if (d.MaskMenu) {
                     // The modifier down already reached Windows. A neutral Ctrl pair marks the chord
                     // as used, preventing a bare Win/Alt release from opening Start/app menus.

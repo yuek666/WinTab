@@ -37,6 +37,7 @@ namespace WindowTabManager
         [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll")] internal static extern bool ShowWindowAsync(IntPtr hwnd, int cmd);
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wp, IntPtr lp);
         [DllImport("user32.dll")] internal static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
         [DllImport("user32.dll")] internal static extern IntPtr MonitorFromPoint(Point point, uint flags);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
@@ -105,6 +106,12 @@ namespace WindowTabManager
             if (!StillSame(w)) return false;
             if (IsIconic(w.Handle)) ShowWindowAsync(w.Handle, 9);
             return SetForegroundWindow(w.Handle);
+        }
+        internal static bool RequestClose(WindowInfo w)
+        {
+            // Let the application handle WM_CLOSE and its own save/cancel workflow.
+            // Never terminate a process or send to an identity that has been reused.
+            return StillSame(w) && PostMessage(w.Handle, 0x10, IntPtr.Zero, IntPtr.Zero);
         }
         internal static Icon ReadIcon(IntPtr hwnd)
         {

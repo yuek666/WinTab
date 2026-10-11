@@ -41,3 +41,11 @@ Updated executable and documentation ready. Manual confirmation of native-compos
 - Add tray diagnostics for last opening time, source/app elevation, visibility and Z-order API status — implemented.
 - Build bin-gamefix and run logic/native preview checks — complete; game and focus stability require manual confirmation.
 - Next: user tests game with this build and supplies shortcut diagnostic text if still failing. Do not label game issue fixed from fixture results.
+
+## UI revision requested 2026-10-11
+User authorized implementation after collecting items 1–9 and a local Figma draft. User verified both Task Manager and Arknights work when elevated; preserve asInvoker and do not auto-elevate.
+1. Independent shortcut switches + saved global mode; first tray click, dark menu, exit without save prompt — complete.
+2. Rounded Alt cards/panel with close request buttons; remove overlay headings/instructions — complete.
+3. Win grouped/compact layouts and actual translucent backdrop with documented DWM limitations — complete.
+4. Refresh light control panel based on readable draft structure — complete.
+5. Meaningful logic/native/UI regressions, inspect artifacts, package standalone revision and document actual limitations — complete.

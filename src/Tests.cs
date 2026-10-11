@@ -91,6 +91,27 @@ namespace WindowTabManager
                 Check(duplicates.Capture("Duplicates again").Rules.Count == 2, "saving ambiguous duplicate titles does not multiply persisted rules");
                 b.Title = "Document B";
 
+                string legacyPath = Path.Combine(temp, "legacy-settings.json");
+                File.WriteAllText(legacyPath, "{\"Version\":1,\"StartupSlot\":-1,\"UseActiveMonitor\":false,\"Slots\":[null,null,null],\"Visibility\":[]}");
+                var legacy = JsonStore.Load(legacyPath);
+                Check(!legacy.PauseAlt && !legacy.PauseWin && !legacy.CompactOverview, "old settings migrate with both shortcuts enabled and grouped layout");
+                legacy.PauseAlt = true; legacy.CompactOverview = true; JsonStore.Save(legacyPath, legacy);
+                var revised = JsonStore.Load(legacyPath);
+                Check(revised.PauseAlt && !revised.PauseWin && revised.CompactOverview, "independent shortcut preference and overview layout survive restart");
+                for (int mask = 0; mask < 4; mask++) {
+                    var configured = new ShortcutState(); bool enabledAlt = (mask & 1) != 0, enabledWin = (mask & 2) != 0;
+                    var altDecision = configured.Handle(9, true, true, false, false, false, enabledAlt, enabledWin);
+                    Check(altDecision.Swallow == enabledAlt && altDecision.MaskMenu == enabledAlt && (altDecision.Action == SwitchAction.BeginAlt) == enabledAlt, "Alt interception respects independent enabled mask " + mask);
+                    configured.Reset();
+                    var winDecision = configured.Handle(9, true, false, true, false, false, enabledAlt, enabledWin);
+                    Check(winDecision.Swallow == enabledWin && winDecision.MaskMenu == enabledWin && (winDecision.Action == SwitchAction.Overview) == enabledWin, "Win interception respects independent enabled mask " + mask);
+                }
+                var pausedChord = new ShortcutState(); pausedChord.Handle(9, true, true, false, false, false);
+                Check(pausedChord.Handle(9, false, true, false, false, false, false, true).Swallow, "pausing mid-chord still consumes the already-intercepted Tab release");
+                Check(pausedChord.Handle(0xA4, false, false, false, false, false, false, true).Action == SwitchAction.None, "pausing Alt cancels pending commit");
+                using (var round = SurfaceStyle.Round(new Rectangle(0, 0, 120, 80), 16))
+                    Check(!round.IsVisible(0, 0) && round.IsVisible(60, 40), "rounded outline excludes square corner and retains center");
+
                 var modifiers = new ModifierState();
                 modifiers.Seed(k => false);
                 modifiers.Observe(0x5B, true);
@@ -192,6 +213,18 @@ namespace WindowTabManager
                 }
                 using (var hook = new KeyboardHook(c => { }, s => log.Add("HOOK WARNING " + s))) { Check(true, "real WH_KEYBOARD_LL installation succeeds (no synthetic shortcut claimed)"); }
                 Check(true, "hook disposal and worker shutdown return successfully");
+                using (var closable = new Form { Text = "WTM safe close fixture", Size = new Size(320, 180) }) {
+                    bool refuse = true; int requests = 0;
+                    closable.FormClosing += delegate(object sender, FormClosingEventArgs e) { requests++; e.Cancel = refuse; };
+                    closable.Show(); Native.ShowWindowAsync(closable.Handle, 5); Pump(100);
+                    var live = Native.Enumerate(new Dictionary<IntPtr, long>(), true).Single(w => w.Handle == closable.Handle);
+                    Check(Native.RequestClose(live), "WM_CLOSE request is posted to real window"); Pump(100);
+                    Check(requests == 1 && !closable.IsDisposed, "application can cancel close to preserve unsaved work");
+                    string key = live.Key; live.Key = "stale";
+                    Check(!Native.RequestClose(live), "close request rejects stale identity"); live.Key = key;
+                    refuse = false; Check(Native.RequestClose(live), "accepted close request is posted"); Pump(100);
+                    Check(closable.IsDisposed, "normal close destroys fixture without terminating its process");
+                }
                 var snapshots = new ConcurrentQueue<WindowInfo[]>();
                 var errors = new ConcurrentQueue<string>();
                 using (var inventory = new WindowInventory(w => snapshots.Enqueue(w), s => errors.Enqueue(s)))
@@ -311,6 +344,22 @@ namespace WindowTabManager
                     Check(LiveThumbnail.ActiveCount == 0, "disposing Alt overlay releases thumbnail handles");
                     app.OnCommand(new SwitchCommand { Action = SwitchAction.Overview, Monitor = monitor }); Pump(100);
                     Check(app.ControlPanel == null && app.OverviewPanel.PreviewCount == 2, "Win+Tab shows DWM overview without constructing control panel");
+                    log.Add("DWM acrylic requested=" + app.OverviewPanel.AcrylicEnabled + "; result=0x" + app.OverviewPanel.BackdropResult.ToString("X8"));
+                    if (app.OverviewPanel.AcrylicEnabled && Native.GetForegroundWindow() == app.OverviewPanel.Handle) {
+                        var panel = app.OverviewPanel; Point sample = new Point(panel.Left + 5, panel.Bottom - 45);
+                        second.BackColor = Color.FromArgb(210, 45, 60); second.Refresh(); Pump(250);
+                        Color red = SampleScreen(sample);
+                        second.BackColor = Color.FromArgb(30, 90, 220); second.Refresh(); Pump(250);
+                        Color blue = SampleScreen(sample);
+                        if (Native.GetForegroundWindow() == panel.Handle && panel.Visible) {
+                            Check(Math.Abs(red.R - blue.R) + Math.Abs(red.G - blue.G) + Math.Abs(red.B - blue.B) > 15,
+                                "composited translucent background responds to a live source color change (" + red + " -> " + blue + ")");
+                            using (var capture = new Bitmap(panel.Width, panel.Height)) {
+                                using (var graphics = Graphics.FromImage(capture)) graphics.CopyFromScreen(panel.Location, Point.Empty, panel.Size);
+                                capture.Save(Path.Combine(directory, "overview-live-composition.png"));
+                            }
+                        } else log.Add("BLOCKED: foreground changed during the acrylic sample; no visual transparency claim.");
+                    } else log.Add("BLOCKED: acrylic disabled/unsupported or panel not foreground; visual backdrop requires manual check.");
                     Check(app.OverviewPanel.RaiseError == 0 && Above(app.OverviewPanel.Handle, second.Handle), "Win overview is above borderless topmost fixture");
                     app.OnCommand(new SwitchCommand { Action = SwitchAction.Cancel });
                     Native.SetWindowPos(second.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x01 | 0x02 | 0x10 | 0x40);
@@ -318,6 +367,14 @@ namespace WindowTabManager
                     Check(app.OverviewPanel.RaiseError == 0 && Above(app.OverviewPanel.Handle, second.Handle), "reused Win overview reasserts Z order on reopening");
                     var group = app.Model.AddGroup("Second group"); app.Model.Move(windows[1], group.Id); app.Changed();
                     Check(app.OverviewPanel.PreviewCount == 2, "regrouping keeps real thumbnails available");
+                    app.SetOverviewMode(true); Pump(100);
+                    Check(app.OverviewPanel.PreviewCount == 2 && app.OverviewPanel.GroupHeaderCount == 0, "changing live overview layout preserves both DWM thumbnails");
+                    if (Native.GetForegroundWindow() == app.OverviewPanel.Handle && app.OverviewPanel.Visible)
+                        using (var capture = new Bitmap(app.OverviewPanel.Width, app.OverviewPanel.Height)) {
+                            using (var graphics = Graphics.FromImage(capture)) graphics.CopyFromScreen(app.OverviewPanel.Location, Point.Empty, app.OverviewPanel.Size);
+                            capture.Save(Path.Combine(directory, "overview-compact-live.png"));
+                        }
+                    app.SetOverviewMode(false);
                     app.OverviewPanel.Size = new Size(800, 400); Pump(50);
                     Check(app.OverviewPanel.PreviewCount == 1 && LiveThumbnail.ActiveCount == 1, "offscreen group previews are unregistered in a small viewport");
                     app.OverviewPanel.ScrollContent(10000); Pump(50);
@@ -327,6 +384,7 @@ namespace WindowTabManager
                     Check(app.OverviewPanel.PreviewCount == 1 && LiveThumbnail.ActiveCount == 1, "hiding a window releases its thumbnail immediately");
                     app.OnCommand(new SwitchCommand { Action = SwitchAction.Cancel });
                     Check(LiveThumbnail.ActiveCount == 0, "closing Win+Tab leaves no thumbnail composition active");
+                    Check(!app.OverviewPanel.BackdropVisible, "closing Win+Tab hides its separate translucent backdrop");
                     using (var external = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--fixture") { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden })) {
                         WindowInfo source = null; var wait = Stopwatch.StartNew();
                         while (source == null && wait.ElapsedMilliseconds < 2500) {
@@ -344,6 +402,13 @@ namespace WindowTabManager
                 }
             } catch (Exception e) { failures++; log.Add(e.ToString()); }
             return Finish(Path.Combine(directory, "preview-test.txt"));
+        }
+        private static Color SampleScreen(Point point)
+        {
+            using (var bitmap = new Bitmap(1, 1)) {
+                using (var graphics = Graphics.FromImage(bitmap)) graphics.CopyFromScreen(point, Point.Empty, new Size(1, 1));
+                return bitmap.GetPixel(0, 0);
+            }
         }
         public static int UiRun(string directory)
         {
@@ -376,6 +441,43 @@ namespace WindowTabManager
                         alt.Show(); Pump(100); alt.Step(true); Check(alt.Index == 0, "Alt switcher cycles through frozen candidate list");
                         using (var bitmap = new Bitmap(alt.Width, alt.Height)) { alt.DrawToBitmap(bitmap, new Rectangle(Point.Empty, alt.Size)); bitmap.Save(Path.Combine(directory, "alt-switcher.png")); }
                     }
+                    app.Model.SetVisibility(windows[1], false, false); app.SetOverviewMode(true);
+                    app.OnCommand(new SwitchCommand { Action = SwitchAction.Overview, Monitor = monitor });
+                    Check(app.OverviewPanel.CardCount == 3 && app.OverviewPanel.GroupHeaderCount == 0, "compact mode packs windows from different groups without group rows");
+                    if (monitor.Monitor.Bounds.Width >= 1000) Check(app.OverviewPanel.CardRectangle(0).Top == app.OverviewPanel.CardRectangle(1).Top, "windows from different groups share a row in compact mode");
+                    using (var bitmap = new Bitmap(app.OverviewPanel.Width, app.OverviewPanel.Height)) { app.OverviewPanel.DrawToBitmap(bitmap, app.OverviewPanel.ClientRectangle); bitmap.Save(Path.Combine(directory, "overview-compact.png")); }
+                    app.OnCommand(new SwitchCommand { Action = SwitchAction.Cancel });
+                    string chosen = null, closed = null;
+                    using (var alt = new AltSwitcher(windows, new SwitchCommand { Monitor = monitor }, w => chosen = w.Key, app.Icons, w => closed = w.Key)) {
+                        alt.Show(); var closeBox = alt.CloseRectangle(0);
+                        alt.ClickAt(new Point(closeBox.Left + 14, closeBox.Top + 14), MouseButtons.Left);
+                        Check(closed == windows[0].Key && chosen == null, "Alt close hit target requests close without selecting the window");
+                        alt.UpdateCandidates(new[] { windows[0], windows[2] });
+                        Check(alt.CardCount == 2 && !alt.Candidates.Any(w => w.Key == windows[1].Key), "closed Alt candidate is removed without adding new windows");
+                        Check(alt.Region != null && !alt.Region.IsVisible(0, 0), "Alt native window region has rounded corners");
+                    }
+                    int menuOpened = 0; app.TrayMenu.Opened += delegate { menuOpened++; };
+                    app.TrayMenu.Show(new Point(monitor.Work.Left + 60, monitor.Work.Top + 60));
+                    Check(menuOpened == 1 && app.TrayMenu.Visible, "tray menu opens on the first request");
+                    Check(app.TrayMenu.Renderer is DarkMenuRenderer, "tray menu uses dark renderer");
+                    using (var bitmap = new Bitmap(app.TrayMenu.Width, app.TrayMenu.Height)) { app.TrayMenu.DrawToBitmap(bitmap, app.TrayMenu.ClientRectangle); bitmap.Save(Path.Combine(directory, "tray-menu.png")); }
+                    app.TrayMenu.Close();
+                    app.SetShortcutEnabled(true, false);
+                    Check(!app.AltEnabled && app.WinEnabled, "controller pauses Alt while keeping Win enabled");
+                    app.OnCommand(new SwitchCommand { Action = SwitchAction.BeginAlt, Monitor = monitor });
+                    Check(app.AltPanel == null, "queued Alt opening is ignored after pausing Alt");
+                    app.OnCommand(new SwitchCommand { Action = SwitchAction.Overview, Monitor = monitor });
+                    Check(app.OverviewPanel.Visible, "Win overview remains usable with Alt paused");
+                    app.SetShortcutEnabled(false, false);
+                    Check(!app.AltEnabled && !app.WinEnabled && !app.OverviewPanel.Visible, "pausing Win closes its open panel and leaves both shortcuts disabled");
+                    app.SetShortcutEnabled(true, true);
+                    Check(app.AltEnabled && !app.WinEnabled, "Alt can resume without resuming Win");
+                    app.OnCommand(new SwitchCommand { Action = SwitchAction.Overview, Monitor = monitor });
+                    Check(!app.OverviewPanel.Visible, "queued Win opening is ignored while Win paused");
+                    app.SetShortcutEnabled(false, true); app.SetOverviewMode(false);
+                    string beforeExit = File.ReadAllText(Path.Combine(directory, "ui-test-settings.json"));
+                    app.Model.AddGroup("Unsaved at exit"); app.ExitWithoutSaving();
+                    Check(app.Exiting && File.ReadAllText(Path.Combine(directory, "ui-test-settings.json")) == beforeExit, "exit with dirty groups returns immediately without changing saved settings");
                 }
             } catch (Exception e) { failures++; log.Add(e.ToString()); }
             return Finish(Path.Combine(directory, "ui-test.txt"));

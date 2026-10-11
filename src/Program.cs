@@ -62,6 +62,10 @@ namespace WindowTabManager
         private string lastAltAttempt = "Alt+Tab：尚未收到", lastWinAttempt = "Win+Tab：尚未收到";
         internal ManagerForm ControlPanel { get { return control; } }
         internal OverviewSwitcher OverviewPanel { get { return overview; } }
+        internal ContextMenuStrip TrayMenu { get { return menu; } }
+        internal AltSwitcher AltPanel { get { return alt; } }
+        public bool AltEnabled { get { return !paused && !Model.Settings.PauseAlt; } }
+        public bool WinEnabled { get { return !paused && !Model.Settings.PauseWin; } }
 
         public AppController(string settingsPath, bool testMode)
         {
@@ -70,9 +74,11 @@ namespace WindowTabManager
             dispatcher = new Control(); var hwnd = dispatcher.Handle;
             Icons = new IconCache(dispatcher);
             Icons.Changed += delegate { if (control != null) control.RefreshIcons(); if (overview != null) overview.RefreshIcons(); if (alt != null) alt.RefreshIcons(Icons); };
-            menu = new ContextMenuStrip(); menu.Opening += delegate { BuildMenu(); };
+            menu = new DarkMenu();
+            menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e) { BuildMenu(); e.Cancel = false; };
             tray = new NotifyIcon { Icon = AppIcons.Tray, Text = "WindowTabManager — 啟動中", ContextMenuStrip = menu, Visible = !testMode };
             tray.MouseClick += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.Left) ShowControl(); };
+            BuildMenu(); // Populate before the very first opening; an empty menu defaults to Cancel=true.
             SystemEvents.DisplaySettingsChanged += OnDisplayChange;
             SystemEvents.SessionSwitch += OnSessionSwitch;
             if (!testMode) inventory = new WindowInventory(w => Post(delegate { OnWindows(w); }), s => Post(delegate { Report(s); }));
@@ -93,25 +99,38 @@ namespace WindowTabManager
                 if (!testMode) Resume(); else Status = "介面測試（未攔截快捷鍵）";
             }
             string signature = String.Join("\n", windows.Select(w => w.Key + w.Title + w.Monitor + w.Minimized));
-            if (alt != null) alt.RefreshSources();
+            if (alt != null) alt.UpdateCandidates(windows);
             if (lastSnapshot == signature) { if (overview != null) overview.RefreshView(false); return; }
             lastSnapshot = signature; Icons.Prune(windows); Changed();
         }
         private void BuildMenu()
         {
-            menu.Items.Clear();
+            while (menu.Items.Count > 0) { var item = menu.Items[0]; menu.Items.RemoveAt(0); item.Dispose(); }
             menu.Items.Add("開啟控制面板", null, delegate { ShowControl(); });
             var profiles = new ToolStripMenuItem("切換已儲存組態");
             for (int i = 0; i < 3; i++) {
                 int slot = i; var saved = Model.Settings.Slots[i];
                 var entry = new ToolStripMenuItem((i + 1) + " · " + (saved == null ? "尚未儲存" : saved.Name)); entry.Enabled = saved != null;
+                entry.Checked = Model.LoadedSlot == slot;
                 entry.Click += delegate { LoadSlot(slot, null); }; profiles.DropDownItems.Add(entry);
             }
             menu.Items.Add(profiles); menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(paused ? "恢復快捷鍵接管" : "暫停快捷鍵接管", null, delegate { TogglePause(); });
+            var altToggle = new ToolStripMenuItem("接管 Alt + Tab") { Checked = AltEnabled };
+            altToggle.Click += delegate { SetShortcutEnabled(true, !AltEnabled); }; menu.Items.Add(altToggle);
+            var winToggle = new ToolStripMenuItem("接管 Win + Tab") { Checked = WinEnabled };
+            winToggle.Click += delegate { SetShortcutEnabled(false, !WinEnabled); }; menu.Items.Add(winToggle);
+            menu.Items.Add(new ToolStripSeparator());
+            var layout = new ToolStripMenuItem("Win + Tab 排列方式");
+            var grouped = new ToolStripMenuItem("分組排列") { Checked = !Model.Settings.CompactOverview };
+            var compact = new ToolStripMenuItem("原生並排") { Checked = Model.Settings.CompactOverview };
+            grouped.Click += delegate { SetOverviewMode(false); }; compact.Click += delegate { SetOverviewMode(true); };
+            layout.DropDownItems.Add(grouped); layout.DropDownItems.Add(compact); menu.Items.Add(layout);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("快捷鍵診斷", null, delegate { ShowShortcutDiagnostics(); });
-            menu.Items.Add("退出", null, delegate { if (ResolveDirty(null)) ExitThread(); });
+            menu.Items.Add("退出", null, delegate { ExitWithoutSaving(); });
+            ((DarkMenu)menu).StyleItems();
         }
+        public void ExitWithoutSaving() { ExitThread(); }
         public void ShowControl()
         {
             CloseAlt(); if (overview != null) overview.Hide(); PanelClosed();
@@ -123,21 +142,23 @@ namespace WindowTabManager
             if (paused || Exiting) return;
             switch (command.Action) {
                 case SwitchAction.BeginAlt:
+                    if (!AltEnabled) return;
                     panelGeneration = command.Generation;
                     CloseAlt(); if (overview != null) overview.Hide();
                     var candidates = Model.Windows.Where(w => w.Monitor == command.Monitor.Device && !Model.Hidden(w, true)).ToArray();
-                    alt = new AltSwitcher(candidates, command, FocusWindow, Icons); alt.Present(); RecordAttempt(command, alt); break;
-                case SwitchAction.StepForward: if (alt != null) alt.Step(false); break;
-                case SwitchAction.StepBackward: if (alt != null) alt.Step(true); break;
+                    alt = new AltSwitcher(candidates, command, FocusWindow, Icons, RequestCloseWindow); alt.Present(); RecordAttempt(command, alt); break;
+                case SwitchAction.StepForward: if (AltEnabled && alt != null) alt.Step(false); break;
+                case SwitchAction.StepBackward: if (AltEnabled && alt != null) alt.Step(true); break;
                 case SwitchAction.CommitAlt:
-                    if (alt != null) { var panel = alt; panel.Commit(); CloseAlt(); } break;
+                    if (AltEnabled && alt != null) { var panel = alt; panel.Commit(); CloseAlt(); } break;
                 case SwitchAction.Cancel: CloseAlt(); if (overview != null) overview.Hide(); break;
                 case SwitchAction.Overview:
+                    if (!WinEnabled) return;
                     panelGeneration = command.Generation;
                     CloseAlt();
                     if (control != null) control.Hide();
                     if (overview == null || overview.IsDisposed) overview = new OverviewSwitcher(this);
-                    var work = command.Monitor.Work.Bounds;
+                    var work = command.Monitor.Monitor.Bounds;
                     overview.Bounds = work;
                     overview.Present(); overview.RefreshView(true); RecordAttempt(command, overview); break;
             }
@@ -156,7 +177,7 @@ namespace WindowTabManager
             using (var dialog = new Form { Text = "快捷鍵診斷", Size = new Size(690, 370), StartPosition = FormStartPosition.CenterScreen }) {
                 Theme.Apply(dialog);
                 dialog.Controls.Add(new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical,
-                    Text = "WindowTabManager 遊戲相容性修訂 1\r\n本程式：" + Native.Elevation((uint)System.Diagnostics.Process.GetCurrentProcess().Id) +
+                    Text = "WindowTabManager 介面修訂 2\r\n本程式：" + Native.Elevation((uint)System.Diagnostics.Process.GetCurrentProcess().Id) +
                     "；" + Status + "\r\n\r\n" + lastAltAttempt + "\r\n\r\n" + lastWinAttempt +
                     "\r\n\r\n以上是最近一次開啟請求，並非目前可見狀態。可 Ctrl+A、Ctrl+C 複製。\r\n" +
                     "在遊戲裡按鍵後，時間未更新：請先暫停／恢復接管再測試。\r\n" +
@@ -169,6 +190,14 @@ namespace WindowTabManager
         {
             CloseAlt(); if (overview != null) overview.Hide(); if (control != null) control.Hide(); PanelClosed();
             if (!Native.Activate(w)) Report("無法切換：視窗已關閉，或 Windows 拒絕前景切換。請從工作列開啟。");
+            RefreshInventory();
+        }
+        public void RequestCloseWindow(WindowInfo w)
+        {
+            CloseAlt(); if (overview != null) overview.Hide(); PanelClosed();
+            // Dismiss the switcher before the app can ask to save a document.
+            Native.Activate(w);
+            if (!Native.RequestClose(w)) Report("無法送出關閉要求：視窗已關閉或權限不足。");
             RefreshInventory();
         }
         private void CloseAlt() { if (alt != null) { var panel = alt; alt = null; panel.Close(); panel.Dispose(); } }
@@ -192,6 +221,34 @@ namespace WindowTabManager
         {
             Model.Settings.UseActiveMonitor = active; if (keyboard != null) keyboard.UseActiveMonitor = active;
             Persist(Model.Settings); Changed();
+        }
+        public void SetOverviewMode(bool compact)
+        {
+            Model.Settings.CompactOverview = compact; Persist(Model.Settings); Changed();
+        }
+        public void SetShortcutEnabled(bool altShortcut, bool enabled)
+        {
+            if (altShortcut) {
+                Model.Settings.PauseAlt = !enabled;
+                if (!enabled && alt != null) { CloseAlt(); PanelClosed(); }
+            } else {
+                Model.Settings.PauseWin = !enabled;
+                if (!enabled && overview != null && overview.Visible) { overview.Hide(); PanelClosed(); }
+            }
+            Persist(Model.Settings);
+            if (Model.Settings.PauseAlt && Model.Settings.PauseWin) Pause();
+            else if (keyboard == null && !testMode) Resume();
+            else {
+                paused = false;
+                if (keyboard != null) keyboard.Configure(!Model.Settings.PauseAlt, !Model.Settings.PauseWin);
+                UpdateShortcutStatus();
+            }
+            Changed();
+        }
+        private void UpdateShortcutStatus()
+        {
+            Status = "Alt+Tab " + (AltEnabled ? "接管中" : "已暫停") + " · Win+Tab " + (WinEnabled ? "接管中" : "已暫停");
+            tray.Text = "WindowTabManager — " + Status;
         }
         public void SetHidden(WindowInfo w, bool altHidden, bool hidden) { Model.SetVisibility(w, altHidden, hidden); Persist(Model.Settings); Changed(); }
         public void SetStartup(int slot)
@@ -242,9 +299,8 @@ namespace WindowTabManager
         }
         public void TogglePause()
         {
-            CloseAlt(); if (overview != null) overview.Hide();
-            if (paused) Resume(); else Pause();
-            Changed();
+            bool enable = !AltEnabled && !WinEnabled;
+            SetShortcutEnabled(true, enable); SetShortcutEnabled(false, enable);
         }
         private void Pause()
         {
@@ -253,10 +309,11 @@ namespace WindowTabManager
         }
         private void Resume()
         {
+            if (Model.Settings.PauseAlt && Model.Settings.PauseWin) { Pause(); return; }
             try {
-                keyboard = new KeyboardHook(c => Post(delegate { OnCommand(c); }), s => Post(delegate { Report(s); }));
+                keyboard = new KeyboardHook(c => Post(delegate { OnCommand(c); }), s => Post(delegate { Report(s); }), !Model.Settings.PauseAlt, !Model.Settings.PauseWin);
                 keyboard.UseActiveMonitor = Model.Settings.UseActiveMonitor; paused = false;
-                Status = "快捷鍵接管中"; tray.Text = "WindowTabManager — 接管中";
+                UpdateShortcutStatus();
             } catch (Exception e) { paused = true; Status = "攔截未啟用"; Report(e.Message); }
         }
         private void Report(string message)

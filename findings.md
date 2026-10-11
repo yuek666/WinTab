@@ -16,3 +16,11 @@
 - Microsoft Disabling Shortcut Keys in Games shows fullscreen Win-key filtering via low-level hooks; this is a possibility, not evidence that Arknights uses that implementation.
 - TopMost style alone does not explicitly refresh relative Z order on each opening; Present now issues HWND_TOPMOST with NOSIZE/NOMOVE/NOACTIVATE/SHOWWINDOW.
 - Test fixture uses a normal borderless monitor-sized topmost WinForms window, not a game renderer. Intermittent focus changes mean no general focus stability claim. Last fixture run passed; actual game still unverified.
+
+## UI revision 2 findings
+- Microsoft ContextMenuStrip example explicitly clears e.Cancel after dynamic population because empty menus default to cancellation: https://learn.microsoft.com/dotnet/api/system.windows.forms.contextmenustrip
+- WM_CLOSE uses asynchronous PostMessage, respects target save/cancel and UIPI: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-postmessagew
+- Documented DWMSBT_TRANSIENTWINDOW / Desktop Acrylic starts at Windows 11 build 22621: https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type
+- GDI black zero-alpha is used for DWM extended frame: https://learn.microsoft.com/en-us/windows/win32/dwm/customframe
+- Runtime evidence: native API S_OK alone did not prove transparency; actual controlled source sampling failed with a single opaque foreground. Separate alpha backdrop + opaque region-clipped card surface passed the composited color-change test. Actual screenshot confirms transparency, not native-equivalent blur.
+- The former intermittent focus test now has an observed in-process cause: Form.TopMost's handle-creation activation. Native WS_EX_TOPMOST avoids that managed setter.

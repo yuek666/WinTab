@@ -36,3 +36,13 @@
 - Added event-based modifier tracking, unlock resync, explicit per-open topmost positioning, and copyable tray diagnostics (last Alt/Win opening only, no ordinary key logging).
 - Built bin-gamefix independently; logic 50 pass. Native preview final run 19 pass. Earlier focus/Z-order assertions were unstable; TESTING.md retains this limitation. Game input, focus and visual occlusion need physical testing.
 - Two documentation patch batches failed validation before changing any files; corrected and reapplied.
+
+## UI revision 2 — 2026-10-11
+- Implemented all nine collected changes, including a light control panel using the readable draft structure; dark tray/context menus; independent persistent shortcut switches; explicit first-menu cancellation fix; exit without saving dirty groups.
+- Added native WM_CLOSE buttons (no process termination), rounded window/card geometry, heading/help removal, grouped/compact overview, and a translucent backdrop separate from opaque DWM cards.
+- Diagnosed previous Alt focus instability using WM_ACTIVATE stack: WinForms Form.TopMost setter during CreateHandle used SetWindowPos with activation. Replaced managed TopMost with native style plus explicit NOACTIVATE positioning; fixed mouse-activation handling.
+- Full-screen DWM Acrylic request alone returned S_OK but produced opaque gray pixels in this environment. Split backdrop at 0.64 opacity from region-clipped opaque card surface. Actual composited RGB changed with controlled source; blur parity is explicitly not claimed.
+- 63 logic + 28 native + 24 UI + 22 preview checks passed. Native cursor repositioning remains BLOCKED. First tray Opening path verified; physical shell gestures remain manual.
+- Performance: 3 sources; idle 36.77 MiB, overview 40.44 MiB (3 active DWM thumbnails), returned 40.68 MiB (0 thumbnails). Process CPU 0.016/0.016/0.000 seconds over ~15s phases; excludes DWM/GPU.
+- Initial intermediate bin-ui-v2 rebuild encountered a file lock without a visible matching process; used bin-preview-v2. Existing bin/bin-icon/bin-gamefix preserved. Default script/MSBuild output now bin-preview-v2.
+- User had confirmed both Task Manager and Arknights work elevated; manifest remains asInvoker and no auto-elevation was added.
