@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -21,6 +22,7 @@ namespace WindowTabManager
             if (args.Length > 0 && args[0] == "--native-test") return Tests.NativeRun(args.Length > 1 ? args[1] : "native-test.txt");
             if (args.Length > 0 && args[0] == "--ui-test") return Tests.UiRun(args.Length > 1 ? args[1] : "artifacts");
             if (args.Length > 0 && args[0] == "--preview-test") return Tests.PreviewRun(args.Length > 1 ? args[1] : "artifacts");
+            if (args.Length > 0 && args[0] == "--monitor-test") return Tests.MonitorRun(args.Length > 1 ? args[1] : "artifacts");
             if (args.Length > 0 && args[0] == "--perf-test") return Tests.PerfRun(args.Length > 1 ? args[1] : "artifacts");
             string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WindowTabManager");
             if (args.Length == 2 && args[0] == "--data-dir") directory = Path.GetFullPath(args[1]);
@@ -54,6 +56,7 @@ namespace WindowTabManager
         private KeyboardHook keyboard;
         private ManagerForm control;
         private OverviewSwitcher overview;
+        private readonly List<OverviewSwitcher> overviews = new List<OverviewSwitcher>();
         private AltSwitcher alt;
         private bool initialized, paused, disposed;
         private readonly bool testMode;
@@ -62,6 +65,7 @@ namespace WindowTabManager
         private string lastAltAttempt = "Alt+Tab：尚未收到", lastWinAttempt = "Win+Tab：尚未收到";
         internal ManagerForm ControlPanel { get { return control; } }
         internal OverviewSwitcher OverviewPanel { get { return overview; } }
+        internal OverviewSwitcher[] OverviewPanels { get { return overviews.ToArray(); } }
         internal ContextMenuStrip TrayMenu { get { return menu; } }
         internal AltSwitcher AltPanel { get { return alt; } }
         public bool AltEnabled { get { return !paused && !Model.Settings.PauseAlt; } }
@@ -73,7 +77,7 @@ namespace WindowTabManager
             Model = new Workspace(JsonStore.Load(settingsPath));
             dispatcher = new Control(); var hwnd = dispatcher.Handle;
             Icons = new IconCache(dispatcher);
-            Icons.Changed += delegate { if (control != null) control.RefreshIcons(); if (overview != null) overview.RefreshIcons(); if (alt != null) alt.RefreshIcons(Icons); };
+            Icons.Changed += delegate { if (control != null) control.RefreshIcons(); foreach (var panel in overviews) panel.RefreshIcons(); if (alt != null) alt.RefreshIcons(Icons); };
             menu = new DarkMenu();
             menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e) { BuildMenu(); e.Cancel = false; };
             tray = new NotifyIcon { Icon = AppIcons.Tray, Text = "WindowTabManager — 啟動中", ContextMenuStrip = menu, Visible = !testMode };
@@ -100,7 +104,7 @@ namespace WindowTabManager
             }
             string signature = String.Join("\n", windows.Select(w => w.Key + w.Title + w.Monitor + w.Minimized));
             if (alt != null) alt.UpdateCandidates(windows);
-            if (lastSnapshot == signature) { if (overview != null) overview.RefreshView(false); return; }
+            if (lastSnapshot == signature) { foreach (var panel in overviews) panel.RefreshView(false); return; }
             lastSnapshot = signature; Icons.Prune(windows); Changed();
         }
         private void BuildMenu()
@@ -125,6 +129,9 @@ namespace WindowTabManager
             var compact = new ToolStripMenuItem("原生並排") { Checked = Model.Settings.CompactOverview };
             grouped.Click += delegate { SetOverviewMode(false); }; compact.Click += delegate { SetOverviewMode(true); };
             layout.DropDownItems.Add(grouped); layout.DropDownItems.Add(compact); menu.Items.Add(layout);
+            layout.DropDownItems.Add(new ToolStripSeparator());
+            var centered = new ToolStripMenuItem("視窗置中排列") { Checked = Model.Settings.CenterOverview };
+            centered.Click += delegate { SetOverviewCentered(!Model.Settings.CenterOverview); }; layout.DropDownItems.Add(centered);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("快捷鍵診斷", null, delegate { ShowShortcutDiagnostics(); });
             menu.Items.Add("退出", null, delegate { ExitWithoutSaving(); });
@@ -133,7 +140,7 @@ namespace WindowTabManager
         public void ExitWithoutSaving() { ExitThread(); }
         public void ShowControl()
         {
-            CloseAlt(); if (overview != null) overview.Hide(); PanelClosed();
+            CloseAlt(); CloseOverview();
             if (control == null || control.IsDisposed) control = new ManagerForm(this, false);
             control.Show(); control.WindowState = FormWindowState.Normal; control.Activate(); control.RefreshView(true);
         }
@@ -144,24 +151,48 @@ namespace WindowTabManager
                 case SwitchAction.BeginAlt:
                     if (!AltEnabled) return;
                     panelGeneration = command.Generation;
-                    CloseAlt(); if (overview != null) overview.Hide();
+                    CloseAlt(); HideOverviews();
                     var candidates = Model.Windows.Where(w => w.Monitor == command.Monitor.Device && !Model.Hidden(w, true)).ToArray();
                     alt = new AltSwitcher(candidates, command, FocusWindow, Icons, RequestCloseWindow); alt.Present(); RecordAttempt(command, alt); break;
                 case SwitchAction.StepForward: if (AltEnabled && alt != null) alt.Step(false); break;
                 case SwitchAction.StepBackward: if (AltEnabled && alt != null) alt.Step(true); break;
                 case SwitchAction.CommitAlt:
                     if (AltEnabled && alt != null) { var panel = alt; panel.Commit(); CloseAlt(); } break;
-                case SwitchAction.Cancel: CloseAlt(); if (overview != null) overview.Hide(); break;
+                case SwitchAction.Cancel: CloseAlt(); CloseOverview(); break;
                 case SwitchAction.Overview:
                     if (!WinEnabled) return;
                     panelGeneration = command.Generation;
                     CloseAlt();
                     if (control != null) control.Hide();
-                    if (overview == null || overview.IsDisposed) overview = new OverviewSwitcher(this);
-                    var work = command.Monitor.Monitor.Bounds;
-                    overview.Bounds = work;
-                    overview.Present(); overview.RefreshView(true); RecordAttempt(command, overview); break;
+                    ShowOverviews(command.Monitor.Device);
+                    if (overview != null) RecordAttempt(command, overview); break;
             }
+        }
+        private void ShowOverviews(string preferredDevice)
+        {
+            var screens = Screen.AllScreens;
+            foreach (var panel in overviews.ToArray()) {
+                if (panel.IsDisposed || !screens.Any(s => s.DeviceName == panel.MonitorDevice)) {
+                    panel.Dispose(); overviews.Remove(panel);
+                }
+            }
+            foreach (var screen in screens) {
+                var panel = overviews.FirstOrDefault(p => p.MonitorDevice == screen.DeviceName);
+                if (panel == null) { panel = new OverviewSwitcher(this, screen.DeviceName); overviews.Add(panel); }
+                panel.Bounds = screen.Bounds;
+            }
+            overview = overviews.FirstOrDefault(p => p.MonitorDevice == preferredDevice) ?? overviews.FirstOrDefault();
+            // Other monitors must not steal keyboard focus while the session opens.
+            foreach (var panel in overviews.Where(p => p != overview)) { panel.Present(false); panel.RefreshView(true); }
+            if (overview != null) { overview.Present(); overview.RefreshView(true); }
+        }
+        private void HideOverviews() { foreach (var panel in overviews) { panel.HideSessionMenu(); panel.Hide(); } }
+        public void CloseOverview() { HideOverviews(); PanelClosed(); }
+        internal void DisplayConfigurationChanged()
+        {
+            CloseAlt(); CloseOverview();
+            foreach (var panel in overviews) panel.Dispose();
+            overviews.Clear(); overview = null; RefreshInventory();
         }
         private void RecordAttempt(SwitchCommand command, PreviewSurface panel)
         {
@@ -169,15 +200,16 @@ namespace WindowTabManager
             string attempt = (command.Action == SwitchAction.BeginAlt ? "Alt+Tab" : "Win+Tab") + "：" + DateTime.Now.ToString("HH:mm:ss") +
                 " 已收到\r\n來源 PID=" + pid + "（" + Native.Elevation(pid) + "）" +
                 "；面板 Visible=" + panel.Visible + "；置頂錯誤碼=" + panel.RaiseError + "；候選=" + panel.CardCount;
-            if (command.Action == SwitchAction.BeginAlt) lastAltAttempt = attempt; else lastWinAttempt = attempt;
+            if (command.Action == SwitchAction.BeginAlt) lastAltAttempt = attempt;
+            else lastWinAttempt = attempt + "\r\n各螢幕：" + String.Join("；", overviews.Select(p => p.MonitorDevice + " 候選=" + p.CardCount + " Visible=" + p.Visible + " 置頂錯誤碼=" + p.RaiseError));
         }
         private void ShowShortcutDiagnostics()
         {
-            CloseAlt(); if (overview != null) overview.Hide(); PanelClosed();
+            CloseAlt(); CloseOverview();
             using (var dialog = new Form { Text = "快捷鍵診斷", Size = new Size(690, 370), StartPosition = FormStartPosition.CenterScreen }) {
                 Theme.Apply(dialog);
                 dialog.Controls.Add(new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical,
-                    Text = "WindowTabManager 介面修訂 2\r\n本程式：" + Native.Elevation((uint)System.Diagnostics.Process.GetCurrentProcess().Id) +
+                    Text = "WindowTabManager 置中排列修訂 4\r\n本程式：" + Native.Elevation((uint)System.Diagnostics.Process.GetCurrentProcess().Id) +
                     "；" + Status + "\r\n\r\n" + lastAltAttempt + "\r\n\r\n" + lastWinAttempt +
                     "\r\n\r\n以上是最近一次開啟請求，並非目前可見狀態。可 Ctrl+A、Ctrl+C 複製。\r\n" +
                     "在遊戲裡按鍵後，時間未更新：請先暫停／恢復接管再測試。\r\n" +
@@ -188,13 +220,13 @@ namespace WindowTabManager
         }
         public void FocusWindow(WindowInfo w)
         {
-            CloseAlt(); if (overview != null) overview.Hide(); if (control != null) control.Hide(); PanelClosed();
+            CloseAlt(); CloseOverview(); if (control != null) control.Hide();
             if (!Native.Activate(w)) Report("無法切換：視窗已關閉，或 Windows 拒絕前景切換。請從工作列開啟。");
             RefreshInventory();
         }
         public void RequestCloseWindow(WindowInfo w)
         {
-            CloseAlt(); if (overview != null) overview.Hide(); PanelClosed();
+            CloseAlt(); CloseOverview();
             // Dismiss the switcher before the app can ask to save a document.
             Native.Activate(w);
             if (!Native.RequestClose(w)) Report("無法送出關閉要求：視窗已關閉或權限不足。");
@@ -210,7 +242,7 @@ namespace WindowTabManager
         public void Changed()
         {
             if (control != null) control.RefreshView(false);
-            if (overview != null) overview.RefreshView(false);
+            foreach (var panel in overviews) panel.RefreshView(false);
         }
         private bool Persist(Settings settings)
         {
@@ -226,6 +258,10 @@ namespace WindowTabManager
         {
             Model.Settings.CompactOverview = compact; Persist(Model.Settings); Changed();
         }
+        public void SetOverviewCentered(bool centered)
+        {
+            Model.Settings.CenterOverview = centered; Persist(Model.Settings); Changed();
+        }
         public void SetShortcutEnabled(bool altShortcut, bool enabled)
         {
             if (altShortcut) {
@@ -233,7 +269,7 @@ namespace WindowTabManager
                 if (!enabled && alt != null) { CloseAlt(); PanelClosed(); }
             } else {
                 Model.Settings.PauseWin = !enabled;
-                if (!enabled && overview != null && overview.Visible) { overview.Hide(); PanelClosed(); }
+                if (!enabled && overviews.Any(p => p.Visible)) CloseOverview();
             }
             Persist(Model.Settings);
             if (Model.Settings.PauseAlt && Model.Settings.PauseWin) Pause();
@@ -279,8 +315,8 @@ namespace WindowTabManager
             if (!Model.Dirty) return true;
             CloseAlt(); PanelClosed();
             if (owner == null) {
-                if (overview != null && overview.Visible) owner = overview;
-                else if (control != null && control.Visible) owner = control;
+                owner = overviews.FirstOrDefault(p => p.Visible && p.ContainsFocus) ?? overviews.FirstOrDefault(p => p.Visible);
+                if (owner == null && control != null && control.Visible) owner = control;
             }
             using (var dialog = new Form { Text = "分組有尚未儲存的修改", Size = new Size(520, 205), StartPosition = FormStartPosition.CenterScreen, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false }) {
                 Theme.Apply(dialog); dialog.Padding = new Padding(14);
@@ -324,18 +360,18 @@ namespace WindowTabManager
         public void RefreshInventory() { if (inventory != null) inventory.RequestRefresh(); }
         private void OnDisplayChange(object sender, EventArgs e)
         {
-            Post(delegate { CloseAlt(); if (overview != null) overview.Hide(); PanelClosed(); RefreshInventory(); });
+            Post(DisplayConfigurationChanged);
         }
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
             if (e.Reason == SessionSwitchReason.SessionUnlock)
                 Post(delegate { if (keyboard != null) keyboard.ResyncModifiers(); });
             if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.SessionLogoff)
-                Post(delegate { CloseAlt(); if (overview != null) overview.Hide(); PanelClosed(); });
+                Post(delegate { CloseAlt(); CloseOverview(); });
         }
         public void FatalError(Exception e)
         {
-            Pause(); CloseAlt(); if (overview != null) overview.Hide();
+            Pause(); CloseAlt(); CloseOverview();
             MessageBox.Show("已停用快捷鍵接管：" + e.Message + "\n可從系統匣恢復，或退出後重新啟動。", "WindowTabManager", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         protected override void ExitThreadCore() { Exiting = true; Dispose(); base.ExitThreadCore(); }
@@ -345,7 +381,7 @@ namespace WindowTabManager
                 disposed = true; Exiting = true;
                 SystemEvents.DisplaySettingsChanged -= OnDisplayChange; SystemEvents.SessionSwitch -= OnSessionSwitch;
                 if (keyboard != null) keyboard.Dispose(); if (inventory != null) inventory.Dispose();
-                CloseAlt(); if (control != null) control.Dispose(); if (overview != null) overview.Dispose();
+                CloseAlt(); if (control != null) control.Dispose(); foreach (var panel in overviews) panel.Dispose(); overviews.Clear(); overview = null;
                 tray.Visible = false; tray.Dispose(); menu.Dispose(); Icons.Dispose(); dispatcher.Dispose();
             }
             base.Dispose(disposing);

@@ -58,6 +58,7 @@ namespace WindowTabManager
         [DataMember] public bool PauseAlt;
         [DataMember] public bool PauseWin;
         [DataMember] public bool CompactOverview;
+        [DataMember] public bool CenterOverview;
         [DataMember] public Profile[] Slots = new Profile[3];
         [DataMember] public List<WindowRule> Visibility = new List<WindowRule>();
     }

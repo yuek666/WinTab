@@ -17,6 +17,7 @@ namespace WindowTabManager
         private readonly CheckBox activeMonitor = new CheckBox { AutoSize = true, Text = "Alt+Tab 依作用中視窗判定螢幕", Margin = new Padding(8) };
         private readonly CheckBox altEnabled = new CheckBox { AutoSize = true, Text = "接管 Alt + Tab", Margin = new Padding(8) };
         private readonly CheckBox winEnabled = new CheckBox { AutoSize = true, Text = "接管 Win + Tab", Margin = new Padding(8) };
+        private readonly CheckBox centerOverview = new CheckBox { AutoSize = true, Text = "Win+Tab 視窗置中排列", Margin = new Padding(8) };
         private readonly ComboBox layoutBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 132 };
         private readonly ContextMenuStrip context;
         private bool updating;
@@ -29,7 +30,7 @@ namespace WindowTabManager
             var header = new Label { Dock = DockStyle.Top, Height = 72, Font = new Font(Font.FontFamily, 20, FontStyle.Bold), Padding = new Padding(2, 20, 0, 0), Text = "視窗管理", ForeColor = Theme.Ink };
             stateLabel = new Label { Dock = DockStyle.Bottom, Height = 36, Padding = new Padding(2, 10, 0, 0), AutoEllipsis = true, ForeColor = Color.FromArgb(101, 112, 128) };
 
-            var settings = new TableLayoutPanel { Dock = DockStyle.Top, Height = 184, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 0, 0, 12) };
+            var settings = new TableLayoutPanel { Dock = DockStyle.Top, Height = 218, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 0, 0, 12) };
             settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 54)); settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46));
             var profiles = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, Padding = new Padding(0, 4, 0, 0) };
             profiles.Controls.Add(slotBox);
@@ -45,11 +46,13 @@ namespace WindowTabManager
             options.Controls.Add(altEnabled); options.Controls.Add(winEnabled); options.SetFlowBreak(winEnabled, true);
             options.Controls.Add(activeMonitor); options.SetFlowBreak(activeMonitor, true);
             options.Controls.Add(Theme.Label("Win+Tab 排列")); layoutBox.Items.AddRange(new object[] { "分組排列", "原生並排" }); options.Controls.Add(layoutBox);
+            options.SetFlowBreak(layoutBox, true); options.Controls.Add(centerOverview);
             settings.Controls.Add(Card("快捷鍵與切換", options), 1, 0);
             altEnabled.CheckedChanged += delegate { if (!updating) app.SetShortcutEnabled(true, altEnabled.Checked); };
             winEnabled.CheckedChanged += delegate { if (!updating) app.SetShortcutEnabled(false, winEnabled.Checked); };
             activeMonitor.CheckedChanged += delegate { if (!updating) app.SetMonitorMode(activeMonitor.Checked); };
             layoutBox.SelectedIndexChanged += delegate { if (!updating) app.SetOverviewMode(layoutBox.SelectedIndex == 1); };
+            centerOverview.CheckedChanged += delegate { if (!updating) app.SetOverviewCentered(centerOverview.Checked); };
 
             var groups = Theme.Bar(); groups.BackColor = Color.White; groups.Padding = new Padding(8, 8, 8, 8);
             groups.Controls.Add(Theme.Label("群組")); groups.Controls.Add(groupBox);
@@ -126,6 +129,7 @@ namespace WindowTabManager
             string signature = model.Current.GetHashCode() + String.Join("\n", model.Windows.Select(w => w.Key + w.Title + w.Monitor + w.Minimized + model.GroupOf(w) + model.Hidden(w, true) + model.Hidden(w, false))) + String.Join("|", model.Current.Groups.Select(g => g.Id + g.Name));
             UpdateStatus(); updating = true;
             activeMonitor.Checked = model.Settings.UseActiveMonitor; altEnabled.Checked = app.AltEnabled; winEnabled.Checked = app.WinEnabled; layoutBox.SelectedIndex = model.Settings.CompactOverview ? 1 : 0;
+            centerOverview.Checked = model.Settings.CenterOverview;
             int slot = Math.Max(0, slotBox.SelectedIndex); slotBox.Items.Clear();
             for (int i = 0; i < 3; i++) slotBox.Items.Add((i + 1) + " · " + (model.Settings.Slots[i] == null ? "空白" : model.Settings.Slots[i].Name) + (model.Settings.StartupSlot == i ? " ★" : ""));
             slotBox.SelectedIndex = slot; updating = false;

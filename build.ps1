@@ -1,4 +1,4 @@
-param([switch]$Test, [string]$OutputDirectory = 'bin-preview-v2')
+param([switch]$Test, [string]$OutputDirectory = 'bin-centered-v4')
 $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (!(Test-Path -LiteralPath $compiler)) { throw '.NET Framework 4.x x64 compiler is required.' }

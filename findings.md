@@ -1,5 +1,10 @@
 # Findings
 
+## Per-monitor Win+Tab
+- Existing controller owns one OverviewSwitcher and all lifecycle paths target it. Replace with a coordinated collection; keep a preferred panel for initial keyboard focus.
+- Each overview will retain a monitor device ID and filter both layouts without altering shared group membership. Empty remote-only groups should not create empty rows.
+- Show passive monitor panels without activation, then activate the requested monitor once. Microsoft reference: https://learn.microsoft.com/dotnet/api/system.windows.forms.form.showwithoutactivation . Enumerate current displays at every opening via Screen.AllScreens.
+
 - Host: Windows build 26200, x64. .NET Framework 4.8 compiler exists; .NET SDK absent.
 - Microsoft LowLevelKeyboardProc documentation: callback runs before async key state update, needs message loop, must return promptly; Windows may silently remove timed-out hooks. Use a dedicated thread and never enumerate windows or read icons in callback.
 - Microsoft SetForegroundWindow documentation: foreground acquisition is restricted and can fail; restore then attempt activation and report failure, without claiming a guaranteed bypass.

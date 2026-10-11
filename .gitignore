@@ -7,3 +7,5 @@ obj/
 artifacts/
 *.user
 .vs/
+bin-multimonitor-v3/
+bin-centered-v4/

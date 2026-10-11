@@ -5,7 +5,7 @@
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <AssemblyName>WindowTabManager</AssemblyName>
     <RootNamespace>WindowTabManager</RootNamespace>
-    <OutputPath>bin-preview-v2\</OutputPath>
+    <OutputPath>bin-centered-v4\</OutputPath>
     <PlatformTarget>x64</PlatformTarget>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>assets\WindowTabManager.ico</ApplicationIcon>

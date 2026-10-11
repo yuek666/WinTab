@@ -6,9 +6,23 @@ Windows 原生系統匣程式，接管 **Alt+Tab** 與 **Win+Tab**，提供視�
 
 **交付狀態：已可建置並執行；原生 API 與自動測試已部分實測。實體 Alt/Win 按鍵、使用者觸發的焦點切換與螢幕拔除，仍須依 `TESTING.md` 人工驗證。** 不應將已安裝 Hook 解讀為已驗證所有 Shell 快捷鍵行為。
 
-## 介面修訂 2（2026-10-11）
+## 置中排列修訂 4（2026-10-11）
 
-新版執行檔：`bin-preview-v2\WindowTabManager.exe`，已建置，不需重新編譯。從舊版系統匣退出後再開新版，設定位置共用。使用者已確認舊版以系統管理員執行時，工作管理員與 GRYPHLINE《明日方舟》皆可正常接管；需要在這些程式使用時，請以相同方式啟動新版。程式仍是 `asInvoker`，不會自動要求提權。
+新增可獨立勾選的「視窗置中排列」：系統匣右鍵 → Win + Tab 排列方式 → 視窗置中排列，或控制面板 → 快捷鍵與切換 → Win+Tab 視窗置中排列。預設關閉，沿用原有對齊方式；選項為全域設定，立即生效並保留至下次啟動，不需要另存分組組態。
+
+分組排列及原生並排皆適用：每個螢幕各自水平置中每列卡片，最後一列也會置中。內容能放入預覽區時，整體垂直置中；內容超出高度則從上方排列並可捲動。這只改變切換器內的預覽位置，不會移動桌面上的實際視窗。
+
+## 多螢幕修訂 3（2026-10-11）
+
+Win+Tab 現在會在每個已連接螢幕各自開啟透明總覽，只顯示該螢幕的視窗；分組排列與原生並排都適用。群組資料仍可跨螢幕，各面板僅呈現本機螢幕的成員，不顯示只有其他螢幕成員的空群組。沒有候選時顯示空清單提示。
+
+視窗移動到另一個螢幕後，收到視窗更新時卡片會移至對應面板。任一面板選取視窗、關閉／Esc、點空白背景，以及開啟控制面板或暫停 Win 接管，都會收起全部總覽及透明底層。螢幕設定變更時收起並釋放所有面板，下次 Win+Tab 依當時連接的螢幕重建。
+
+本機雙螢幕原生測試已驗證分配、DWM 預覽、移動／最小化／新增／關閉視窗及共同收起；實體按鍵、混合 DPI、實際拔除／接回螢幕仍須依 `TESTING.md` 人工確認。
+
+## 保留的介面修訂 2 功能
+
+新版執行檔：`bin-centered-v4\WindowTabManager.exe`，已建置，不需重新編譯。從舊版系統匣退出後再開新版，設定位置共用。使用者已確認舊版以系統管理員執行時，工作管理員與 GRYPHLINE《明日方舟》皆可正常接管；需要在這些程式使用時，請以相同方式啟動新版。程式仍是 `asInvoker`，不會自動要求提權。
 
 | 本次需求 | 實作 |
 |---|---|
@@ -34,10 +48,10 @@ Windows 關閉透明效果或開啟高對比時會使用實色底層。控制面
 
 ```powershell
 .\build.ps1
-.\bin-preview-v2\WindowTabManager.exe
+.\bin-centered-v4\WindowTabManager.exe
 ```
 
-也可以直接雙擊 `bin-preview-v2\WindowTabManager.exe`。啟動後只顯示系統匣圖示，若圖示被 Windows 收進溢位區，請點工作列右下角的上箭頭。左鍵開啟控制面板，右鍵提供組態切換、各快捷鍵接管開關、Win+Tab 排列及退出。
+也可以直接雙擊 `bin-centered-v4\WindowTabManager.exe`。啟動後只顯示系統匣圖示，若圖示被 Windows 收進溢位區，請點工作列右下角的上箭頭。左鍵開啟控制面板，右鍵提供組態切換、各快捷鍵接管開關、Win+Tab 排列及退出。
 
 程式、系統匣及控制面板使用提供的藍色視窗 SVG 圖示，原始檔在 `assets/WindowTabManager.svg`；多尺寸 ICO（16–256px）已內嵌於執行檔。若修改 SVG，可執行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-Icon.ps1` 重建圖示，再建置程式。
 
@@ -144,7 +158,7 @@ Alt+Tab 和 Win+Tab 隱藏設定相互獨立。隱藏只排除本程式的切換
 測試隔離資料可使用：
 
 ```powershell
-.\bin-preview-v2\WindowTabManager.exe --data-dir .\artifacts\sandbox-profile
+.\bin-centered-v4\WindowTabManager.exe --data-dir .\artifacts\sandbox-profile
 ```
 
 同一資料目錄限定單一執行個體。不要同時以不同資料目錄啟動多個接管程序，避免 Hook 互相競爭。
@@ -182,9 +196,10 @@ Alt+Tab 和 Win+Tab 隱藏設定相互獨立。隱藏只排除本程式的切換
 .\build.ps1 -Test
 .\verify.ps1 -Native -UI
 .\verify.ps1 -Preview
+.\verify.ps1 -Monitors
 .\verify.ps1 -Performance
 ```
 
-原生測試會短暫建立自己的視窗、嘗試取得前景與移動滑鼠，再還原原滑鼠位置。效能測試會執行真實接管約 45 秒，期間開啟 Win+Tab 即時預覽，再自動結束；請勿同時執行正式程式。UI 渲染測試使用範例資料，不安裝鍵盤 Hook；`-Preview` 另外建立兩個真實來源視窗驗證 DWM 註冊、更新與釋放，並在受控視窗覆蓋的畫面量測背景像素變化。一般 `DrawToBitmap` 圖片不包含 DWM 像素；`overview-live-composition.png`、`overview-compact-live.png` 則是受控視窗的實際合成畫面。新版報告位於 `artifacts/ui-v2`，可用 `verify.ps1 -OutputDirectory ...` 指定建置位置。
+原生測試會短暫建立自己的視窗、嘗試取得前景與移動滑鼠，再還原原滑鼠位置。效能測試會執行真實接管約 45 秒，期間開啟 Win+Tab 即時預覽，再自動結束；請勿同時執行正式程式。UI 渲染測試使用範例資料，不安裝鍵盤 Hook；`-Monitors` 以各螢幕真實來源視窗驗證分配、移動及全體收起；`-Preview` 另外建立兩個真實來源視窗驗證 DWM 註冊、更新與釋放，並在受控視窗覆蓋的畫面量測背景像素變化。一般 `DrawToBitmap` 圖片不包含 DWM 像素；`overview-live-composition.png`、`overview-compact-live.png` 則是受控視窗的實際合成畫面。新版報告位於 `artifacts/centered-v4`，可用 `verify.ps1 -OutputDirectory ...` 指定建置位置。
 
 自動測試 exit code 0 代表沒有斷言失敗，**不代表 `BLOCKED` 項目已驗證**。完整結果、驗收清單與 Windows 文件來源見 `TESTING.md`。

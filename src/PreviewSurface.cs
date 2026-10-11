@@ -33,6 +33,7 @@ namespace WindowTabManager
         private readonly ToolTip tips = new ToolTip();
         private string tip = "";
         private OverviewBackdrop backdrop;
+        private bool activateOnShow = true;
         protected abstract bool IsOverview { get; }
         protected abstract void Choose(WindowInfo window);
         protected abstract void Reflow();
@@ -51,6 +52,7 @@ namespace WindowTabManager
         public int CardCount { get { return Cards.Count; } }
         public int RegistrationCount { get { return Thumbnails.Count; } }
         internal int GroupHeaderCount { get { return Sections.Count; } }
+        internal WindowInfo[] CardWindows { get { return Cards.Select(c => c.Window).ToArray(); } }
         internal Rectangle CardRectangle(int index) { return CardBox(Cards[index]); }
         internal Rectangle CloseRectangle(int index) { return CloseBox(CardBox(Cards[index])); }
         internal string ThumbnailResults { get { return String.Join(", ", Thumbnails.Values.Select(t => "0x" + t.Result.ToString("X8"))); } }
@@ -70,8 +72,10 @@ namespace WindowTabManager
         // Set the native TOPMOST style directly. Form.TopMost's CreateHandle path
         // invokes SetWindowPos without NOACTIVATE and steals focus from the source.
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x88; return cp; } }
-        public void Present()
+        protected override bool ShowWithoutActivation { get { return !IsOverview || !activateOnShow; } }
+        public void Present(bool activate = true)
         {
+            activateOnShow = activate;
             if (IsOverview) {
                 EnsureBackdrop(); backdrop.Bounds = Bounds; backdrop.Show();
                 Native.SetWindowPos(backdrop.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x01 | 0x02 | 0x10 | 0x40);
@@ -79,7 +83,7 @@ namespace WindowTabManager
             Show();
             bool raised = Native.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x01 | 0x02 | 0x10 | 0x40);
             RaiseError = raised ? 0 : Marshal.GetLastWin32Error();
-            if (IsOverview) Activate();
+            if (IsOverview && activate) Activate();
         }
         private void ApplySurface()
         {
@@ -396,16 +400,17 @@ namespace WindowTabManager
     internal sealed class OverviewSwitcher : PreviewSurface
     {
         private readonly AppController app;
+        internal readonly string MonitorDevice;
         private string signature;
         private DarkMenu popup;
         protected override bool IsOverview { get { return true; } }
         protected override bool Compact { get { return app != null && app.Model.Settings.CompactOverview; } }
-        public OverviewSwitcher(AppController app) : base(app.Icons) { this.app = app; Text = "WindowTabManager — Win+Tab"; }
+        public OverviewSwitcher(AppController app, string monitorDevice) : base(app.Icons) { this.app = app; MonitorDevice = monitorDevice; Text = "WindowTabManager — Win+Tab"; }
         public void RefreshView(bool force)
         {
             if (!Visible) return;
             var model = app.Model;
-            string next = Compact + String.Join("\n", model.Windows.Select(w => w.Key + w.Title + w.Monitor + w.Minimized + model.GroupOf(w) + model.Hidden(w, false))) + String.Join("|", model.Current.Groups.Select(g => g.Id + g.Name));
+            string next = Compact + ":" + model.Settings.CenterOverview + String.Join("\n", model.Windows.Select(w => w.Key + w.Title + w.Monitor + w.Minimized + model.GroupOf(w) + model.Hidden(w, false))) + String.Join("|", model.Current.Groups.Select(g => g.Id + g.Name));
             if (force || signature != next) { signature = next; Reflow(); }
             SyncPreviews(); Invalidate();
         }
@@ -418,25 +423,42 @@ namespace WindowTabManager
             int width = Math.Min(400, (Viewport.Width - (Columns - 1) * 20) / Columns);
             int height = Math.Min(280, Math.Max(208, width * 9 / 16 + 72));
             int y = 8;
+            var localWindows = app.Model.Windows.Where(w => w.Monitor == MonitorDevice && !app.Model.Hidden(w, false)).ToArray();
             if (Compact) {
-                var windows = app.Model.Windows.Where(w => !app.Model.Hidden(w, false)).ToArray();
+                var windows = localWindows;
                 int startX = 20 + Math.Max(0, (Viewport.Width - Math.Min(Columns, windows.Length) * (width + 20) + 20) / 2);
                 for (int i = 0; i < windows.Length; i++) Cards.Add(new PreviewCard { Window = windows[i], GroupName = app.Model.GroupName(windows[i]), Bounds = new Rectangle(startX + i % Columns * (width + 20), y + i / Columns * (height + 20), width, height) });
                 y += ((windows.Length + Columns - 1) / Columns) * (height + 20);
             } else foreach (var group in app.Model.Current.Groups.Concat(new[] { new GroupInfo { Name = "未分組" } })) {
-                var windows = app.Model.Windows.Where(w => app.Model.GroupOf(w) == group.Id && !app.Model.Hidden(w, false)).ToArray();
-                if (group.Id == null && windows.Length == 0 && app.Model.Current.Groups.Count > 0) continue;
+                var windows = localWindows.Where(w => app.Model.GroupOf(w) == group.Id).ToArray();
+                if (windows.Length == 0) continue;
                 Sections.Add(new PreviewGroup { Id = group.Id, Name = group.Name, Y = y, Count = windows.Length }); y += 38;
                 for (int i = 0; i < windows.Length; i++) Cards.Add(new PreviewCard { Window = windows[i], Bounds = new Rectangle(20 + i % Columns * (width + 20), y + i / Columns * (height + 20), width, height) });
                 y += Math.Max(1, (windows.Length + Columns - 1) / Columns) * (windows.Length == 0 ? 36 : height + 20) + 12;
             }
             ContentHeight = y;
+            if (app.Model.Settings.CenterOverview && Cards.Count > 0) {
+                // Center each row, including a short last row. Keep grouping and MRU order.
+                foreach (var row in Cards.GroupBy(c => c.Bounds.Top)) {
+                    int rowWidth = row.Sum(c => c.Bounds.Width) + (row.Count() - 1) * 20;
+                    int x = Viewport.Left + (Viewport.Width - rowWidth) / 2;
+                    foreach (var card in row) { var bounds = card.Bounds; bounds.X = x; card.Bounds = bounds; x += bounds.Width + 20; }
+                }
+                int top = Sections.Count > 0 ? Sections.Min(s => s.Y) : Cards.Min(c => c.Bounds.Top);
+                int bottom = Cards.Max(c => c.Bounds.Bottom);
+                // Taller content retains top alignment and ordinary scrolling.
+                int offset = bottom - top <= Viewport.Height ? (Viewport.Height - (bottom - top)) / 2 - top : 0;
+                foreach (var card in Cards) { var bounds = card.Bounds; bounds.Offset(0, offset); card.Bounds = bounds; }
+                foreach (var section in Sections) section.Y += offset;
+                ContentHeight = Math.Max(Viewport.Height, bottom + offset);
+            }
             SelectedIndex = Cards.FindIndex(c => c.Window.Key == selected);
             if (SelectedIndex < 0 && Cards.Count > 0) SelectedIndex = 0;
         }
         protected override void Choose(WindowInfo window) { app.FocusWindow(window); }
         protected override void CloseSource(WindowInfo window) { app.RequestCloseWindow(window); }
-        protected override void Cancel() { Hide(); app.PanelClosed(); }
+        protected override void Cancel() { app.CloseOverview(); }
+        public void HideSessionMenu() { if (popup != null) popup.Close(); }
         protected override void ToggleLayout() { ScrollOffset = 0; app.SetOverviewMode(!Compact); }
         protected override void OnFormClosing(FormClosingEventArgs e) { if (!app.Exiting) { e.Cancel = true; Cancel(); } base.OnFormClosing(e); }
         protected override void AddGroup()

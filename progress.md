@@ -1,5 +1,19 @@
 # Progress
 
+## Centered overview revision 4 — 2026-10-11
+- Added independent persistent CenterOverview setting, default off, with tray submenu and control-panel checkboxes. Applies immediately to both layouts on each monitor.
+- Rows including short last rows center horizontally; complete fitting content centers vertically in the preview viewport, while tall content stays scrollable. Source HWND positions and groups are unchanged.
+- Verified 65 logic, 27 UI, 34 native monitor assertions; reviewed control-panel and centered layout images. Corrected an overflow test whose viewport was smaller than one card; no production defect in that result.
+- Built separate bin-centered-v4 executable, preserving older binaries. No resource remeasurement or physical input/game claims.
+
+## Multi-monitor revision 3 — 2026-10-11
+- User authorized previously marked item 10. Added per-device overview collection, local filtering in both layouts, coordinated lifecycle, and per-monitor diagnostics. Shared group/visibility model unchanged.
+- Display changes dispose all surfaces; next opening reconciles current screens. Non-target panels show without activation; target retains original activation behavior.
+- First run passed lifecycle/distribution but foreground assertion was BLOCKED with all panels set to ShowWithoutActivation. Restricted no-activate to passive panels; final target-focus and live transparency tests passed.
+- Final functional run: 63 logic + 24 UI + 22 preview + 31 monitor checks pass (140 total). Physical unplug/reconnect, mixed DPI and physical shortcut/game interaction remain manual.
+- Viewed portrait/landscape monitor-layout PNGs: correct local-only cards, labels and toolbar boundaries. These DrawToBitmap images do not include DWM pixels.
+- Separate bin-multimonitor-v3 output preserves existing versions and settings. Resource measurement: idle 37.20 MiB / CPU 0.156s (~15s), returned 43.43 MiB / CPU 0.109s. Visible-phase sample ended with hidden overlays and zero DWM registrations, explicitly marked inconclusive; no multi-monitor visible performance claim.
+
 - Environment inspected. No existing source files or AGENTS.md found.
 - Requirements mapped to native services and explicit persisted configuration slots.
 - Implemented native Win32 inventory, event hooks, keyboard worker, persistence, tray and WinForms panels.

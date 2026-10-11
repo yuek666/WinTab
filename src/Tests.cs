@@ -95,9 +95,11 @@ namespace WindowTabManager
                 File.WriteAllText(legacyPath, "{\"Version\":1,\"StartupSlot\":-1,\"UseActiveMonitor\":false,\"Slots\":[null,null,null],\"Visibility\":[]}");
                 var legacy = JsonStore.Load(legacyPath);
                 Check(!legacy.PauseAlt && !legacy.PauseWin && !legacy.CompactOverview, "old settings migrate with both shortcuts enabled and grouped layout");
-                legacy.PauseAlt = true; legacy.CompactOverview = true; JsonStore.Save(legacyPath, legacy);
+                Check(!legacy.CenterOverview, "old settings preserve existing alignment until centering is enabled");
+                legacy.PauseAlt = true; legacy.CompactOverview = true; legacy.CenterOverview = true; JsonStore.Save(legacyPath, legacy);
                 var revised = JsonStore.Load(legacyPath);
                 Check(revised.PauseAlt && !revised.PauseWin && revised.CompactOverview, "independent shortcut preference and overview layout survive restart");
+                Check(revised.CenterOverview, "overview centering preference survives restart independently of layout");
                 for (int mask = 0; mask < 4; mask++) {
                     var configured = new ShortcutState(); bool enabledAlt = (mask & 1) != 0, enabledWin = (mask & 2) != 0;
                     var altDecision = configured.Handle(9, true, true, false, false, false, enabledAlt, enabledWin);
@@ -290,8 +292,8 @@ namespace WindowTabManager
                             process.WorkingSet64 / 1048576.0, process.PrivateMemorySize64 / 1048576.0, app.Model.Windows.Length, app.Status, LiveThumbnail.ActiveCount));
                         if (phase == 0) { Check(app.ControlPanel == null, "normal startup stays tray-only"); app.OnCommand(new SwitchCommand { Action = SwitchAction.Overview, Monitor = Native.TargetMonitor(false) }); }
                         else if (phase == 1) {
-                            log.Add("Overview visible=" + app.OverviewPanel.Visible + "; cards=" + app.OverviewPanel.CardCount + "; thumbnail HRESULTs=" + app.OverviewPanel.ThumbnailResults);
-                            if (!app.OverviewPanel.Visible || app.OverviewPanel.PreviewCount == 0) log.Add("BLOCKED: no active preview at sample end; this sample does not establish live-preview rendering cost.");
+                            foreach (var panel in app.OverviewPanels) log.Add(panel.MonitorDevice + ": overview visible=" + panel.Visible + "; cards=" + panel.CardCount + "; thumbnail HRESULTs=" + panel.ThumbnailResults);
+                            if (!app.OverviewPanels.Any(p => p.Visible && p.PreviewCount > 0)) log.Add("BLOCKED: no active preview at sample end; this sample does not establish live-preview rendering cost.");
                             app.OnCommand(new SwitchCommand { Action = SwitchAction.Cancel }); Check(LiveThumbnail.ActiveCount == 0, "closing measured overview releases all live previews");
                         }
                         else { timer.Stop(); app.ExitThread(); return; }
@@ -308,6 +310,113 @@ namespace WindowTabManager
                 if (hwnd == lower) return true;
             return false;
         }
+        public static int MonitorRun(string directory)
+        {
+            log.Clear(); failures = 0; Directory.CreateDirectory(directory);
+            var sources = new List<Form>();
+            IntPtr original = Native.GetForegroundWindow();
+            try {
+                var screens = Screen.AllScreens;
+                log.Add("Connected monitors: " + screens.Length);
+                foreach (var screen in screens) {
+                    log.Add(screen.DeviceName + " " + screen.Bounds);
+                    var source = new Form { Text = "Monitor fixture " + screen.DeviceName, StartPosition = FormStartPosition.Manual,
+                        Bounds = new Rectangle(screen.WorkingArea.Left + 40, screen.WorkingArea.Top + 40, 380, 250), BackColor = Color.SteelBlue };
+                    sources.Add(source); source.Show(); Native.ShowWindowAsync(source.Handle, 5);
+                }
+                Pump(150);
+                using (var app = new AppController(Path.Combine(directory, "monitor-settings-" + Guid.NewGuid().ToString("N") + ".json"), true)) {
+                    Func<WindowInfo[]> snapshot = () => Native.Enumerate(new Dictionary<IntPtr, long>(), true).Where(w => sources.Any(f => !f.IsDisposed && f.Handle == w.Handle)).ToArray();
+                    var windows = snapshot(); app.OnWindows(windows);
+                    Check(windows.Length == screens.Length, "one real native source exists on every monitor");
+                    var group = app.Model.AddGroup("跨螢幕共用群組");
+                    foreach (var window in windows) app.Model.Move(window, group.Id);
+                    var command = new SwitchCommand { Action = SwitchAction.Overview, Monitor = Native.Monitor(Native.MonitorFromWindow(sources[0].Handle, 2)) };
+                    app.OnCommand(command); Pump(100);
+                    Check(app.OverviewPanels.Length == screens.Length && app.OverviewPanels.All(p => p.Visible && p.BackdropVisible), "Win opens a visible overview and backdrop on every connected monitor");
+                    foreach (var screen in screens) {
+                        var panel = app.OverviewPanels.Single(p => p.MonitorDevice == screen.DeviceName);
+                        Check(panel.Bounds == screen.Bounds, "overview covers its own monitor bounds: " + screen.DeviceName);
+                        Check(panel.CardCount == 1 && panel.CardWindows.All(w => w.Monitor == screen.DeviceName), "grouped overview contains only local windows: " + screen.DeviceName);
+                        Check(panel.PreviewCount == 1 && panel.GroupHeaderCount == 1, "local source has a live DWM preview in shared group: " + screen.DeviceName);
+                    }
+                    Check(app.OverviewPanels.Sum(p => p.CardCount) == windows.Length && LiveThumbnail.ActiveCount == windows.Length, "cross-monitor group does not duplicate cards or thumbnails");
+                    if (Native.GetForegroundWindow() == app.OverviewPanel.Handle) Check(true, "requested monitor receives initial keyboard focus");
+                    else log.Add("BLOCKED: Windows denied initial overview foreground; physical-keyboard focus needs confirmation.");
+                    app.SetOverviewMode(true);
+                    Check(app.OverviewPanels.All(p => p.GroupHeaderCount == 0 && p.CardCount == 1 && p.PreviewCount == 1), "compact layout updates all monitors without leaking remote windows");
+                    app.SetOverviewCentered(true);
+                    foreach (var panel in app.OverviewPanels) {
+                        var box = panel.CardRectangle(0);
+                        Check(Math.Abs(box.Left + box.Right - panel.ClientSize.Width) <= 1 && Math.Abs(box.Top + box.Bottom - (panel.ClientSize.Height + 40)) <= 1 && panel.PreviewCount == 1,
+                            "centering uses each monitor's own viewport and preserves live preview: " + panel.MonitorDevice);
+                    }
+                    app.SetOverviewMode(false);
+                    Check(app.OverviewPanels.All(p => Math.Abs(p.CardRectangle(0).Left + p.CardRectangle(0).Right - p.ClientSize.Width) <= 1 && p.GroupHeaderCount == 1 && p.PreviewCount == 1),
+                        "grouped mode preserves centered local cards and live previews");
+                    app.SetOverviewCentered(false);
+                    app.Model.SetVisibility(windows[0], false, true); app.Changed();
+                    Check(app.OverviewPanels.Single(p => p.MonitorDevice == windows[0].Monitor).CardCount == 0 && LiveThumbnail.ActiveCount == windows.Length - 1, "hiding removes only the local card and releases its thumbnail");
+                    Check(app.OverviewPanels.Single(p => p.MonitorDevice == windows[0].Monitor).GroupHeaderCount == 0, "empty local monitor does not show groups containing only remote windows");
+                    app.Model.SetVisibility(windows[0], false, false); app.Changed();
+                    Check(LiveThumbnail.ActiveCount == windows.Length, "unhiding restores the local live preview");
+                    var extra = app.Model.AddGroup("Changed group"); app.Model.Move(windows[0], extra.Id); app.Changed();
+                    Check(app.Model.GroupOf(windows[0]) == extra.Id && app.OverviewPanels.Sum(p => p.CardCount) == windows.Length, "shared group edit preserves monitor partition");
+                    app.Model.DeleteGroup(extra); app.Changed();
+                    Check(app.Model.GroupOf(windows[0]) == null && app.OverviewPanels.Sum(p => p.CardCount) == windows.Length, "deleting group moves source to local ungrouped section without closing it");
+                    if (screens.Length > 1) {
+                        var destination = screens[1];
+                        sources[0].Location = new Point(destination.WorkingArea.Left + 80, destination.WorkingArea.Top + 80); Pump(100);
+                        app.OnWindows(snapshot());
+                        Check(app.OverviewPanels.Single(p => p.MonitorDevice == screens[0].DeviceName).CardCount == 0 && app.OverviewPanels.Single(p => p.MonitorDevice == destination.DeviceName).CardCount == 2, "moving a native source transfers its card between monitors while overview is open");
+                        Check(app.OverviewPanels.All(p => p.CardWindows.All(w => w.Monitor == p.MonitorDevice)), "all candidates retain their actual current monitor after movement");
+                        sources[0].WindowState = FormWindowState.Minimized; Pump(100); app.OnWindows(snapshot());
+                        Check(app.OverviewPanels.Single(p => p.MonitorDevice == destination.DeviceName).CardWindows.Any(w => w.Handle == sources[0].Handle && w.Minimized), "minimized source retains its owning monitor");
+                        sources[0].WindowState = FormWindowState.Normal;
+                        sources[0].Location = new Point(screens[0].WorkingArea.Left + 40, screens[0].WorkingArea.Top + 40); Pump(100); app.OnWindows(snapshot());
+                    } else log.Add("BLOCKED: only one monitor connected; cross-monitor transfer needs two displays.");
+                    var refs = app.OverviewPanels;
+                    app.OnCommand(command);
+                    Check(app.OverviewPanels.SequenceEqual(refs) && LiveThumbnail.ActiveCount == windows.Length, "reopening reuses one panel per monitor without duplicate registrations");
+                    for (int i = 0; i < refs.Length; i++) using (var image = new Bitmap(refs[i].Width, refs[i].Height)) {
+                        refs[i].DrawToBitmap(image, refs[i].ClientRectangle); image.Save(Path.Combine(directory, "monitor-layout-" + (i + 1) + ".png"));
+                    }
+                    var added = new Form { Text = "New local window", StartPosition = FormStartPosition.Manual,
+                        Bounds = new Rectangle(screens[0].WorkingArea.Left + 100, screens[0].WorkingArea.Top + 100, 360, 230) };
+                    sources.Add(added); added.Show(); Native.ShowWindowAsync(added.Handle, 5); Pump(100); app.OnWindows(snapshot());
+                    Check(app.OverviewPanels.Single(p => p.MonitorDevice == screens[0].DeviceName).CardWindows.Any(w => w.Handle == added.Handle && app.Model.GroupOf(w) == null) && app.OverviewPanels.Sum(p => p.CardCount) == windows.Length + 1, "new unmatched native window joins only its local ungrouped section");
+                    added.Close(); Pump(50); app.OnWindows(snapshot());
+                    // Exercise the secondary panel's actual close-button route, not only controller cancel.
+                    var secondary = app.OverviewPanels.Last();
+                    secondary.ClickAt(new Point(secondary.Width - 38, 30), MouseButtons.Left);
+                    Check(refs.All(p => !p.Visible && !p.BackdropVisible) && LiveThumbnail.ActiveCount == 0, "closing from any monitor dismisses every surface and releases all previews");
+                    app.OnCommand(command); app.OnCommand(new SwitchCommand { Action = SwitchAction.Cancel });
+                    Check(refs.All(p => !p.Visible && !p.BackdropVisible), "hook Escape/cancel dismisses the entire overview session");
+                    app.OnCommand(command); app.ShowControl();
+                    Check(app.ControlPanel.Visible && refs.All(p => !p.Visible && !p.BackdropVisible), "opening control panel dismisses overviews on all monitors");
+                    app.OnCommand(command); app.SetShortcutEnabled(false, false);
+                    Check(refs.All(p => !p.Visible && !p.BackdropVisible) && LiveThumbnail.ActiveCount == 0, "pausing Win dismisses and releases every monitor's preview");
+                    app.SetShortcutEnabled(false, true); app.OnCommand(command);
+                    app.OnCommand(new SwitchCommand { Action = SwitchAction.BeginAlt, Monitor = command.Monitor });
+                    Check(refs.All(p => !p.Visible && !p.BackdropVisible) && app.AltPanel != null, "Alt opening dismisses every Win overview while remaining monitor-local");
+                    app.OnCommand(new SwitchCommand { Action = SwitchAction.Cancel }); app.OnCommand(command);
+                    secondary = app.OverviewPanels.Last(); var card = secondary.CardRectangle(0);
+                    secondary.ClickAt(new Point(card.Left + 30, card.Top + 60), MouseButtons.Left); Pump(100);
+                    Check(refs.All(p => !p.Visible && !p.BackdropVisible) && LiveThumbnail.ActiveCount == 0, "selecting a real window from any monitor dismisses all overviews");
+                    app.OnCommand(command); app.DisplayConfigurationChanged();
+                    Check(refs.All(p => p.IsDisposed) && app.OverviewPanels.Length == 0 && LiveThumbnail.ActiveCount == 0, "display-change handler disposes all monitor surfaces and previews");
+                    app.OnCommand(command);
+                    Check(app.OverviewPanels.Length == screens.Length && app.OverviewPanels.All(p => p.Visible), "opening after display-change rebuilds current monitor surfaces");
+                    sources[0].Close(); Pump(50); app.OnWindows(snapshot());
+                    Check(app.OverviewPanels.Sum(p => p.CardCount) == windows.Length - 1 && LiveThumbnail.ActiveCount == windows.Length - 1, "closed source disappears without stale thumbnail on any monitor");
+                    var finalPanels = app.OverviewPanels; app.ExitWithoutSaving();
+                    Check(finalPanels.All(p => p.IsDisposed) && LiveThumbnail.ActiveCount == 0, "exit disposes all per-monitor surfaces and previews");
+                }
+                log.Add("Display-change callback exercised without physical unplugging. Physical shortcut gestures, monitor unplug/reconnect, mixed DPI and games remain manual checks.");
+            } catch (Exception e) { failures++; log.Add(e.ToString()); }
+            finally { foreach (var source in sources) source.Dispose(); Native.SetForegroundWindow(original); }
+            return Finish(Path.Combine(directory, "monitor-test.txt"));
+        }
         public static int PreviewRun(string directory)
         {
             log.Clear(); failures = 0; Directory.CreateDirectory(directory);
@@ -317,11 +426,13 @@ namespace WindowTabManager
                 using (var app = new AppController(Path.Combine(directory, "preview-test-settings.json"), true)) {
                     first.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "WindowTabManager\n\nLive document preview\nThis is a real source window.", Font = new Font("Segoe UI", 24), Padding = new Padding(35) });
                     second.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "LIVE DASHBOARD\n\n128  /  256  /  512", Font = new Font("Segoe UI", 24), ForeColor = Color.White, Padding = new Padding(30) });
+                    var monitor = Native.TargetMonitor(false);
+                    first.StartPosition = second.StartPosition = FormStartPosition.Manual;
+                    first.Location = second.Location = new Point(monitor.Work.Left + 40, monitor.Work.Top + 40);
                     first.Show(); second.Show(); Native.ShowWindowAsync(first.Handle, 5); Native.ShowWindowAsync(second.Handle, 5); Pump(200);
                     var windows = Native.Enumerate(new Dictionary<IntPtr, long>(), true).Where(w => w.Handle == first.Handle || w.Handle == second.Handle).ToArray();
                     Check(windows.Length == 2, "preview test uses two real native windows");
                     app.OnWindows(windows);
-                    var monitor = Native.TargetMonitor(false);
                     second.FormBorderStyle = FormBorderStyle.None; second.Bounds = monitor.Monitor.Bounds; second.TopMost = true;
                     Check(Native.SetWindowPos(second.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x01 | 0x02 | 0x10 | 0x40), "borderless monitor-sized topmost test window is raised");
                     Pump(200); // Drain activation messages from changing the fixture's native border style.
@@ -415,17 +526,18 @@ namespace WindowTabManager
             log.Clear(); failures = 0; Directory.CreateDirectory(directory);
             try {
                 using (var app = new AppController(Path.Combine(directory, "ui-test-settings.json"), true)) {
+                    var monitor = Native.TargetMonitor(false);
                     var windows = new[] {
                         Window("a", "專案規格 — WindowTabManager", "C:\\Editor.exe", "\\\\.\\DISPLAY1"),
                         Window("b", "API 文件 — Microsoft Learn", "C:\\Browser.exe", "\\\\.\\DISPLAY2"),
                         Window("c", "產品設計 — 工作筆記", "C:\\Editor.exe", "\\\\.\\DISPLAY2")
                     };
+                    foreach (var window in windows) window.Monitor = monitor.Device;
                     app.OnWindows(windows); app.Model.SetVisibility(windows[1], true, true);
                     app.ShowControl(); Pump(400);
                     using (var bitmap = new Bitmap(app.ControlPanel.Width, app.ControlPanel.Height)) { app.ControlPanel.DrawToBitmap(bitmap, new Rectangle(Point.Empty, app.ControlPanel.Size)); bitmap.Save(Path.Combine(directory, "control-panel.png")); }
                     Check(app.ControlPanel.Visible, "control panel renders with sample data; no live-keyboard hook enabled");
                     app.ControlPanel.Close(); Check(!app.ControlPanel.Visible && !app.ControlPanel.IsDisposed, "closing panel hides it without disposing background controller");
-                    var monitor = Native.TargetMonitor(false);
                     app.OnCommand(new SwitchCommand { Action = SwitchAction.Overview, Monitor = monitor }); Pump(300);
                     using (var bitmap = new Bitmap(app.OverviewPanel.Width, app.OverviewPanel.Height)) { app.OverviewPanel.DrawToBitmap(bitmap, new Rectangle(Point.Empty, app.OverviewPanel.Size)); bitmap.Save(Path.Combine(directory, "overview.png")); }
                     Check(app.OverviewPanel.Visible, "persistent grouped overview renders");
@@ -446,6 +558,17 @@ namespace WindowTabManager
                     Check(app.OverviewPanel.CardCount == 3 && app.OverviewPanel.GroupHeaderCount == 0, "compact mode packs windows from different groups without group rows");
                     if (monitor.Monitor.Bounds.Width >= 1000) Check(app.OverviewPanel.CardRectangle(0).Top == app.OverviewPanel.CardRectangle(1).Top, "windows from different groups share a row in compact mode");
                     using (var bitmap = new Bitmap(app.OverviewPanel.Width, app.OverviewPanel.Height)) { app.OverviewPanel.DrawToBitmap(bitmap, app.OverviewPanel.ClientRectangle); bitmap.Save(Path.Combine(directory, "overview-compact.png")); }
+                    var originalBounds = app.OverviewPanel.Bounds;
+                    app.OverviewPanel.Size = new Size(800, 900); app.SetOverviewCentered(true);
+                    var firstRow = app.OverviewPanel.CardRectangle(0); var lastRow = app.OverviewPanel.CardRectangle(2);
+                    Check(Math.Abs(lastRow.Left + lastRow.Right - 800) <= 1 && Math.Abs(firstRow.Top + lastRow.Bottom - 940) <= 1,
+                        "short final row is horizontally centered and multirow block vertically centered");
+                    using (var bitmap = new Bitmap(800, 900)) { app.OverviewPanel.DrawToBitmap(bitmap, app.OverviewPanel.ClientRectangle); bitmap.Save(Path.Combine(directory, "overview-centered.png")); }
+                    app.OverviewPanel.Size = new Size(800, 400); app.OverviewPanel.ScrollContent(10000);
+                    Check(app.OverviewPanel.CardRectangle(2).Bottom <= 380 && app.OverviewPanel.CardRectangle(2).Top >= 60,
+                        "overflowing centered layout remains scrollable to the last row");
+                    app.SetOverviewCentered(false); app.OverviewPanel.Bounds = originalBounds; app.OverviewPanel.ScrollContent(-10000);
+                    Check(app.OverviewPanel.CardRectangle(0).Top == 68, "disabling centering restores original top alignment");
                     app.OnCommand(new SwitchCommand { Action = SwitchAction.Cancel });
                     string chosen = null, closed = null;
                     using (var alt = new AltSwitcher(windows, new SwitchCommand { Monitor = monitor }, w => chosen = w.Key, app.Icons, w => closed = w.Key)) {
